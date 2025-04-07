@@ -3,6 +3,7 @@ package server;
 import java.io.*;
 import java.net.*;
 import java.util.concurrent.*;
+import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.*;
 
 public class Server implements AuctionFinalizer {
@@ -13,6 +14,8 @@ public class Server implements AuctionFinalizer {
 
     // In-memory registration of clients: name -> ClientInfo
     private ConcurrentHashMap<String, ClientInfo> clients = new ConcurrentHashMap<>();
+
+    private ConcurrentHashMap<String, Set<String>> subscriptions = new ConcurrentHashMap<>();
 
     public Server() throws SocketException {
         socket = new DatagramSocket(UDP_PORT);
@@ -105,10 +108,15 @@ public class Server implements AuctionFinalizer {
 
     private void handleListItem(String[] tokens, DatagramPacket packet) {
         // Format: LIST_ITEM RQ# Item_Name Item_Description Start_Price Duration
+        // Check if enough tokens were provided.
         if (tokens.length < 6) {
-            System.out.println("Invalid LIST_ITEM message.");
+            // Use token[1] if available; otherwise default to "unknown".
+            String rq = (tokens.length >= 2) ? tokens[1] : "unknown";
+            System.out.println("Invalid LIST_ITEM message: not enough parameters.");
+            sendUDPMessage("LIST_DENIED " + rq + " Insufficient parameters for listing item", packet.getAddress(), packet.getPort());
             return;
         }
+
         String rq = tokens[1];
         String itemName = tokens[2];
         String itemDescription = tokens[3];
@@ -119,19 +127,30 @@ public class Server implements AuctionFinalizer {
             duration = Integer.parseInt(tokens[5]);
         } catch (NumberFormatException e) {
             System.out.println("Invalid price or duration in LIST_ITEM.");
+            sendUDPMessage("LIST_DENIED " + rq + " Invalid number format for price or duration", packet.getAddress(), packet.getPort());
             return;
         }
+
         // Identify seller using the packet's IP
         String senderIp = packet.getAddress().getHostAddress();
         int senderPort = packet.getPort();
-        String sellerName = "unknown";
+        String sellerName = null;
         for (ClientInfo info : clients.values()) {
-            // Compare BOTH IP and UDP port
+            // Compare both IP and UDP port.
             if (info.getIp().equals(senderIp) && info.getUdpPort() == senderPort) {
                 sellerName = info.getName();
                 break;
             }
         }
+
+        // If seller is not found, we should deny the listing.
+        if (sellerName == null) {
+            System.out.println("Listing rejected: Seller not registered.");
+            sendUDPMessage("LIST_DENIED " + rq + " Seller not registered", packet.getAddress(), packet.getPort());
+            return;
+        }
+
+        // Everything is valid; create the auction.
         Auction auction = new Auction(itemName, itemDescription, startPrice, duration, sellerName, packet.getAddress(), 0);
         auctionManager.addAuction(auction);
         sendUDPMessage("ITEM_LISTED " + rq, packet.getAddress(), packet.getPort());
@@ -141,14 +160,54 @@ public class Server implements AuctionFinalizer {
     private void handleSubscribe(String[] tokens, DatagramPacket packet) {
         // Format: SUBSCRIBE RQ# Item_Name
         if (tokens.length < 3) {
-            System.out.println("Invalid SUBSCRIBE message.");
+            String rq = (tokens.length >= 2) ? tokens[1] : "unknown";
+            System.out.println("Invalid SUBSCRIBE message: insufficient parameters.");
+            sendUDPMessage("SUBSCRIPTION_DENIED " + rq + " Insufficient parameters for subscription", packet.getAddress(), packet.getPort());
             return;
         }
         String rq = tokens[1];
         String itemName = tokens[2];
-        // For this demo we simply acknowledge the subscription.
+
+        // Check if an auction for the given item exists
+        Auction auction = auctionManager.getAuction(itemName);
+        if (auction == null) {
+            System.out.println("Subscription rejected: No active auction for item " + itemName);
+            sendUDPMessage("SUBSCRIPTION_DENIED " + rq + " No active auction for item", packet.getAddress(), packet.getPort());
+            return;
+        }
+
+        // Identify the client (subscriber) based on packet's IP and UDP port
+        String senderIp = packet.getAddress().getHostAddress();
+        int senderPort = packet.getPort();
+        String clientName = null;
+        for (ClientInfo info : clients.values()) {
+            if (info.getIp().equals(senderIp) && info.getUdpPort() == senderPort) {
+                clientName = info.getName();
+                break;
+            }
+        }
+
+        // If the client is not registered, deny the subscription
+        if (clientName == null) {
+            System.out.println("Subscription rejected: Client not registered.");
+            sendUDPMessage("SUBSCRIPTION_DENIED " + rq + " Client not registered", packet.getAddress(), packet.getPort());
+            return;
+        }
+
+        // Add the client to the subscription list for the item
+        Set<String> subscriberSet = subscriptions.computeIfAbsent(itemName, k -> new CopyOnWriteArraySet<>());
+
+        // If the client is already subscribed, deny the subscription
+        if (subscriberSet.contains(clientName)) {
+            System.out.println("Subscription rejected: " + clientName + " is already subscribed to " + itemName);
+            sendUDPMessage("SUBSCRIPTION_DENIED " + rq + " Already subscribed", packet.getAddress(), packet.getPort());
+            return;
+        }
+
+        // Accept the subscription if all checks pass
+        subscriberSet.add(clientName);
         sendUDPMessage("SUBSCRIBED " + rq, packet.getAddress(), packet.getPort());
-        System.out.println("Subscription received for item: " + itemName);
+        System.out.println("Subscription accepted for item: " + itemName + " by " + clientName);
     }
 
     private void handleBid(String[] tokens, DatagramPacket packet) {
