@@ -139,12 +139,56 @@ public class Client {
     // Thread that listens for TCP finalization messages from the server
     private class TCPListener implements Runnable {
         public void run() {
+            Scanner inputScanner = new Scanner(System.in); // Create a Scanner for user input
             while (!tcpServer.isClosed()) {
                 try {
                     Socket tcpSocket = tcpServer.accept();
                     BufferedReader in = new BufferedReader(new InputStreamReader(tcpSocket.getInputStream()));
                     String message = in.readLine();
                     System.out.println("TCP Received: " + message);
+
+                    // Check if the message is an INFORM_REQ
+                    if (message.startsWith("INFORM_REQ")) {
+                        // Expected format: INFORM_REQ RQ# Item_Name Final_Price
+                        String[] tokens = message.split(" ");
+                        if (tokens.length >= 4) {
+                            String rq = tokens[1];
+                            String itemName = tokens[2];
+                            String finalPrice = tokens[3];
+
+                            System.out.println("Auction for item '" + itemName + "' has closed at price " + finalPrice + ".");
+                            System.out.println("Please provide your payment and shipping details.");
+
+                            // Prompt the user for the required details
+                            System.out.print("Enter your name: ");
+                            String userName = inputScanner.nextLine();
+
+                            System.out.print("Enter your credit card number: ");
+                            String ccNumber = inputScanner.nextLine();
+
+                            System.out.print("Enter your credit card expiration date (MM/YY): ");
+                            String ccExpDate = inputScanner.nextLine();
+
+                            System.out.print("Enter your shipping address: ");
+                            String address = inputScanner.nextLine();
+
+                            // Construct the INFORM_RES message
+                            // Format: INFORM_RES RQ# Name CC# CC_Exp_Date Address
+                            String informResMsg = String.format("INFORM_RES %s %s %s %s %s", rq, userName, ccNumber, ccExpDate, address);
+
+                            // Send the INFORM_RES back to the server's finalization listener
+                            try (Socket responseSocket = new Socket("localhost", 6000);
+                                 PrintWriter out = new PrintWriter(responseSocket.getOutputStream(), true)) {
+                                out.println(informResMsg);
+                                System.out.println("Sent INFORM_RES: " + informResMsg);
+                            } catch (IOException e) {
+                                System.out.println("Error sending INFORM_RES:");
+                                e.printStackTrace();
+                            }
+                        } else {
+                            System.out.println("Malformed INFORM_REQ message.");
+                        }
+                    }
                     tcpSocket.close();
                 } catch (IOException e) {
                     if (!tcpServer.isClosed()) {

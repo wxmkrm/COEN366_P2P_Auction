@@ -2,26 +2,35 @@ package server;
 
 import java.io.*;
 import java.net.*;
+import java.time.LocalDateTime;
 import java.util.concurrent.*;
-import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class Server implements AuctionFinalizer {
     private static final int UDP_PORT = 5000;
     private DatagramSocket socket;
     private ExecutorService executor;
     private AuctionManager auctionManager;
-
     // In-memory registration of clients: name -> ClientInfo
     private ConcurrentHashMap<String, ClientInfo> clients = new ConcurrentHashMap<>();
-
     private ConcurrentHashMap<String, Set<String>> subscriptions = new ConcurrentHashMap<>();
+    // Map from the INFORM_REQ's RQ# to the item being purchased
+    private ConcurrentHashMap<String, String> informRequests = new ConcurrentHashMap<>();
+    // Holds buyer/seller data for finalization
+    private ConcurrentHashMap<String, FinalizationData> finalizationRecords = new ConcurrentHashMap<>();
+    private static AtomicInteger serverRQCounter = new AtomicInteger(1000);
+
+    private String generateServerRQ() {
+        return String.valueOf(serverRQCounter.getAndIncrement());
+    }
 
     public Server() throws SocketException {
         socket = new DatagramSocket(UDP_PORT);
         executor = Executors.newCachedThreadPool();
         auctionManager = new AuctionManager(this); // Server implements AuctionFinalizer
         System.out.println("Server started on UDP port " + UDP_PORT);
+        startFinalizationListener();
     }
 
     public void start() {
@@ -58,8 +67,17 @@ public class Server implements AuctionFinalizer {
             case "SUBSCRIBE":
                 handleSubscribe(tokens, packet);
                 break;
+            case "DE-SUBSCRIBE":
+                handleDeSubscribe(tokens, packet);
+                break;
             case "BID":
                 handleBid(tokens, packet);
+                break;
+            case "ACCEPT":
+                handleAccept(tokens, packet);
+                break;
+            case "REFUSE":
+                handleRefuse(tokens, packet);
                 break;
             default:
                 System.out.println("Unknown command: " + command);
@@ -155,6 +173,43 @@ public class Server implements AuctionFinalizer {
         auctionManager.addAuction(auction);
         sendUDPMessage("ITEM_LISTED " + rq, packet.getAddress(), packet.getPort());
         System.out.println("Auction listed for item: " + itemName + " by " + sellerName);
+
+        // Broadcast the auction announcement to all subscribers of the item.
+        broadcastAuctionAnnouncement(itemName);
+
+        // Schedule a negotiation check at half the auction duration.
+        long durationMillis = java.time.Duration.between(LocalDateTime.now(), auction.getEndTime()).toMillis();
+        long negotiationDelay = durationMillis / 2;
+
+        new Timer().schedule(new TimerTask() {
+            @Override
+            public void run() {
+                // If no bid has been placed, i.e. current bid equals starting price and no highest bidder.
+                if (auction.getCurrentBid() == auction.getStartingPrice() &&
+                        (auction.getHighestBidder() == null || auction.getHighestBidder().equals("unknown"))) {
+                    // Generate a server-side request number.
+                    String negotiationRQ = generateServerRQ();
+                    // Calculate remaining time.
+                    long secondsLeft = java.time.Duration.between(LocalDateTime.now(), auction.getEndTime()).getSeconds();
+                    if (secondsLeft < 0) secondsLeft = 0;
+                    // Construct the NEGOTIATE_REQ message.
+                    String negotiateMsg = String.format("NEGOTIATE_REQ %s %s %.2f %d",
+                            negotiationRQ, auction.getItemName(), auction.getCurrentBid(), secondsLeft);
+                    // Retrieve seller info from the clients map.
+                    ClientInfo sellerInfo = clients.get(auction.getSellerName());
+                    if (sellerInfo != null) {
+                        try {
+                            InetAddress sellerAddress = InetAddress.getByName(sellerInfo.getIp());
+                            int sellerUdpPort = sellerInfo.getUdpPort();
+                            sendUDPMessage(negotiateMsg, sellerAddress, sellerUdpPort);
+                            System.out.println("Negotiation request sent for item: " + auction.getItemName());
+                        } catch (UnknownHostException e) {
+                            System.out.println("Unknown host for seller: " + auction.getSellerName());
+                        }
+                    }
+                }
+            }
+        }, negotiationDelay);
     }
 
     private void handleSubscribe(String[] tokens, DatagramPacket packet) {
@@ -210,6 +265,105 @@ public class Server implements AuctionFinalizer {
         System.out.println("Subscription accepted for item: " + itemName + " by " + clientName);
     }
 
+    private void handleDeSubscribe(String[] tokens, DatagramPacket packet) {
+        // Expected format: DE-SUBSCRIBE RQ# Item_Name
+        if (tokens.length < 3) {
+            String rq = (tokens.length >= 2) ? tokens[1] : "unknown";
+            System.out.println("Invalid DE-SUBSCRIBE message: insufficient parameters.");
+            sendUDPMessage("DE-SUBSCRIBE_DENIED " + rq + " Insufficient parameters", packet.getAddress(), packet.getPort());
+            return;
+        }
+        String rq = tokens[1];
+        String itemName = tokens[2];
+
+        // Identify the client using the packet's IP and UDP port.
+        String senderIp = packet.getAddress().getHostAddress();
+        int senderPort = packet.getPort();
+        String clientName = null;
+        for (ClientInfo info : clients.values()) {
+            if (info.getIp().equals(senderIp) && info.getUdpPort() == senderPort) {
+                clientName = info.getName();
+                break;
+            }
+        }
+        if (clientName == null) {
+            System.out.println("De-subscribe rejected: Client not registered.");
+            sendUDPMessage("DE-SUBSCRIBE_DENIED " + rq + " Client not registered", packet.getAddress(), packet.getPort());
+            return;
+        }
+
+        // Check if the client is subscribed to the item.
+        Set<String> subscriberSet = subscriptions.get(itemName);
+        if (subscriberSet == null || !subscriberSet.contains(clientName)) {
+            System.out.println("De-subscribe rejected: " + clientName + " is not subscribed to " + itemName);
+            sendUDPMessage("DE-SUBSCRIBE_DENIED " + rq + " Not subscribed to item", packet.getAddress(), packet.getPort());
+            return;
+        }
+
+        // Remove the client from the subscription set.
+        subscriberSet.remove(clientName);
+        // Clean up the map if no subscribers remain.
+        if (subscriberSet.isEmpty()) {
+            subscriptions.remove(itemName);
+        }
+
+        // Send confirmation of de-subscription.
+        sendUDPMessage("DE-SUBSCRIBED " + rq, packet.getAddress(), packet.getPort());
+        System.out.println("De-subscribed " + clientName + " from " + itemName);
+    }
+
+    private void broadcastAuctionAnnouncement(String itemName) {
+        // Retrieve the auction object
+        Auction auction = auctionManager.getAuction(itemName);
+        if (auction == null) {
+            System.out.println("No active auction found for item: " + itemName);
+            return;
+        }
+
+        // Generate a server-side request number
+        String rq = generateServerRQ();
+
+        // Calculate time left (in seconds)
+        long secondsLeft = java.time.Duration.between(
+                java.time.LocalDateTime.now(),
+                auction.getEndTime()
+        ).getSeconds();
+        if (secondsLeft < 0) {
+            secondsLeft = 0;
+        }
+
+        // Construct the AUCTION_ANNOUNCE message
+        String message = String.format("AUCTION_ANNOUNCE %s %s %s %.2f %d",
+                rq,
+                auction.getItemName(),
+                auction.getItemDescription(),
+                auction.getCurrentBid(),
+                secondsLeft
+        );
+
+        // Get the set of subscribers for this item
+        Set<String> subscriberSet = subscriptions.get(itemName);
+        if (subscriberSet == null || subscriberSet.isEmpty()) {
+            System.out.println("No subscribers for item: " + itemName);
+            return;
+        }
+
+        // Broadcast the announcement to each subscribed client
+        for (String subscriberName : subscriberSet) {
+            ClientInfo clientInfo = clients.get(subscriberName);
+            if (clientInfo != null) {
+                try {
+                    InetAddress address = InetAddress.getByName(clientInfo.getIp());
+                    int port = clientInfo.getUdpPort();
+                    sendUDPMessage(message, address, port);
+                } catch (UnknownHostException e) {
+                    System.out.println("Unknown host for subscriber: " + subscriberName);
+                }
+            }
+        }
+        System.out.println("Auction announcement sent for item: " + itemName);
+    }
+
     private void handleBid(String[] tokens, DatagramPacket packet) {
         // Format: BID RQ# Item_Name Bid_Amount
         if (tokens.length < 4) {
@@ -263,6 +417,9 @@ public class Server implements AuctionFinalizer {
             );
             sendUDPMessage(updateMsg, packet.getAddress(), packet.getPort());
 
+            // Broadcast the updated auction announcement to all subscribers of the item.
+            broadcastAuctionAnnouncement(itemName);
+
             System.out.println("New bid for item: " + itemName + " Amount: " + bidAmount + " by " + bidderName);
         } else {
             sendUDPMessage("BID_REJECTED " + rq + " Bid lower than current bid",
@@ -270,6 +427,109 @@ public class Server implements AuctionFinalizer {
         }
     }
 
+    private void handleAccept(String[] tokens, DatagramPacket packet) {
+        // Expected Format: ACCEPT RQ# Item_Name New_Price
+        if (tokens.length < 4) {
+            String rq = tokens.length >= 2 ? tokens[1] : "unknown";
+            System.out.println("Invalid ACCEPT message: insufficient parameters.");
+            // Optionally, send an error response.
+            return;
+        }
+        String rq = tokens[1];
+        String itemName = tokens[2];
+        double newPrice;
+        try {
+            newPrice = Double.parseDouble(tokens[3]);
+        } catch (NumberFormatException e) {
+            System.out.println("Invalid new price in ACCEPT message.");
+            return;
+        }
+        // Retrieve the auction for the given item.
+        Auction auction = auctionManager.getAuction(itemName);
+        if (auction == null) {
+            System.out.println("ACCEPT received for non-existent auction: " + itemName);
+            return;
+        }
+        // Update the auction price.
+        auction.setCurrentBid(newPrice);
+
+        // Generate a server request number for the price adjustment broadcast.
+        String serverRQ = generateServerRQ();
+        // Calculate remaining time.
+        long secondsLeft = java.time.Duration.between(LocalDateTime.now(), auction.getEndTime()).getSeconds();
+        if (secondsLeft < 0) secondsLeft = 0;
+        // Construct the PRICE_ADJUSTMENT message.
+        String message = String.format("PRICE_ADJUSTMENT %s %s %.2f %d",
+                serverRQ, itemName, newPrice, secondsLeft);
+
+        // Broadcast the price adjustment to all subscribers.
+        Set<String> subscriberSet = subscriptions.get(itemName);
+        if (subscriberSet != null) {
+            for (String subscriberName : subscriberSet) {
+                ClientInfo clientInfo = clients.get(subscriberName);
+                if (clientInfo != null) {
+                    try {
+                        InetAddress address = InetAddress.getByName(clientInfo.getIp());
+                        int port = clientInfo.getUdpPort();
+                        sendUDPMessage(message, address, port);
+                    } catch (UnknownHostException e) {
+                        System.out.println("Unknown host for subscriber: " + subscriberName);
+                    }
+                }
+            }
+        }
+        System.out.println("Seller accepted negotiation for item: " + itemName + " New Price: " + newPrice);
+    }
+
+    private void handleRefuse(String[] tokens, DatagramPacket packet) {
+        // Expected Format: REFUSE RQ# Item_Name REJECT
+        if (tokens.length < 3) {
+            String rq = tokens.length >= 2 ? tokens[1] : "unknown";
+            System.out.println("Invalid REFUSE message: insufficient parameters.");
+            return;
+        }
+        String rq = tokens[1];
+        String itemName = tokens[2];
+
+        // Log the refusal.
+        System.out.println("Seller refused negotiation for item: " + itemName);
+    }
+
+    private void handlePaymentAndShipping(String itemName, FinalizationData record) {
+        // 1) Attempt to charge the buyer
+        boolean paymentSuccess = processPayment(record.buyerCC, record.buyerExp, record.finalPrice);
+        ClientInfo buyerInfo = clients.get(record.buyerName);
+        ClientInfo sellerInfo = clients.get(record.sellerName);
+
+        if (!paymentSuccess) {
+            // Payment failed => CANCEL
+            sendCancel("Payment processing failed", buyerInfo, sellerInfo);
+            return;
+        }
+
+        // 2) If payment succeeds, credit the seller with 90%
+        double sellerAmount = record.finalPrice * 0.90;
+        System.out.println("Crediting seller with 90% of price: " + sellerAmount + ", retaining 10% as fee.");
+        // In a real system, you’d call an API or do something with seller’s CC here.
+
+        // 3) Send shipping info to the seller
+        // Format: Shipping_Info RQ# Name Winner_Address
+        String shippingRQ = generateServerRQ();
+        String shippingMsg = String.format("Shipping_Info %s %s %s", shippingRQ, record.buyerName, record.buyerAddress);
+        sendTCPMessage(sellerInfo.getIp(), sellerInfo.getTcpPort(), shippingMsg);
+        System.out.println("Sent shipping info to seller: " + record.sellerName);
+    }
+
+    private boolean processPayment(String ccNumber, String ccExpDate, double amount) {
+        System.out.println("Processing payment of " + amount + " for CC: " + ccNumber + " Exp: " + ccExpDate);
+
+        // Simulate payment failure if CC number starts with 4 zeros,
+        // Simulate success otherwise
+        if (ccNumber.startsWith("0000"))
+            return false;
+        else
+            return true;
+    }
 
     private void sendUDPMessage(String message, InetAddress address, int port) {
         try {
@@ -294,20 +554,127 @@ public class Server implements AuctionFinalizer {
         // Save auction result persistently
         saveAuctionResult(auction);
 
-        // If there is a winning bidder, send finalization messages via TCP
         if (highestBidder != null && !highestBidder.equals("unknown")) {
             ClientInfo buyerInfo = clients.get(highestBidder);
             ClientInfo sellerInfo = clients.get(sellerName);
             if (buyerInfo != null && sellerInfo != null) {
+                // Send WINNER and SOLD
                 String buyerMsg = String.format("WINNER %s %.2f %s", itemName, finalPrice, sellerName);
                 sendTCPMessage(buyerInfo.getIp(), buyerInfo.getTcpPort(), buyerMsg);
-
                 String sellerMsg = String.format("SOLD %s %.2f %s", itemName, finalPrice, highestBidder);
                 sendTCPMessage(sellerInfo.getIp(), sellerInfo.getTcpPort(), sellerMsg);
+
+                // Create a record to store finalization data
+                FinalizationData record = new FinalizationData();
+                record.buyerName = highestBidder;
+                record.sellerName = sellerName;
+                record.finalPrice = finalPrice;
+                finalizationRecords.put(itemName, record);
+
+                // Generate an RQ# for INFORM_REQ and remember which item it refers to
+                String informRQ = generateServerRQ();
+                informRequests.put(informRQ, itemName);
+
+                // Send INFORM_REQ to both buyer and seller
+                // Format: INFORM_REQ RQ# Item_Name Final_Price
+                String informReqMsg = String.format("INFORM_REQ %s %s %.2f", informRQ, itemName, finalPrice);
+                sendTCPMessage(buyerInfo.getIp(), buyerInfo.getTcpPort(), informReqMsg);
+                sendTCPMessage(sellerInfo.getIp(), sellerInfo.getTcpPort(), informReqMsg);
+
+                System.out.println("Sent INFORM_REQ to both buyer and seller for item: " + itemName);
             } else {
                 System.out.println("Could not find buyer or seller info for finalization.");
             }
+        } else {
+            // No valid bid -> NON_OFFER
+            ClientInfo sellerInfo = clients.get(sellerName);
+            if (sellerInfo != null) {
+                String rq = generateServerRQ();
+                String nonOfferMsg = String.format("NON_OFFER %s %s", rq, itemName);
+                sendTCPMessage(sellerInfo.getIp(), sellerInfo.getTcpPort(), nonOfferMsg);
+                System.out.println("Auction ended with no bids. NON_OFFER sent to seller: " + sellerName);
+            } else {
+                System.out.println("Seller info not found for auction NON_OFFER message.");
+            }
         }
+    }
+
+    private void startFinalizationListener() {
+        new Thread(() -> {
+            try (ServerSocket finalizationSocket = new ServerSocket(6000)) {
+                System.out.println("Finalization listener started on TCP port 6000");
+                while (true) {
+                    Socket socket = finalizationSocket.accept();
+                    new Thread(() -> {
+                        try (BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()))) {
+                            String message = in.readLine();
+                            System.out.println("Received INFORM_RES: " + message);
+                            // Expected format: INFORM_RES RQ# Name CC# CC_Exp_Date Address
+                            String[] tokens = message.split(" ", 6);
+                            if (tokens.length < 6) {
+                                System.out.println("Malformed INFORM_RES message received.");
+                                return;
+                            }
+                            String cmd = tokens[0];    // INFORM_RES
+                            String rq = tokens[1];     // RQ# from the server
+                            String clientName = tokens[2];
+                            String ccNumber = tokens[3];
+                            String ccExpDate = tokens[4];
+                            String address = tokens[5];
+
+                            // Find which item this RQ# corresponds to
+                            String itemName = informRequests.get(rq);
+                            if (itemName == null) {
+                                System.out.println("No matching itemName for RQ#: " + rq);
+                                return;
+                            }
+
+                            // Retrieve the finalization record
+                            FinalizationData record = finalizationRecords.get(itemName);
+                            if (record == null) {
+                                System.out.println("No finalization record found for item: " + itemName);
+                                return;
+                            }
+
+                            // Check if this client is buyer or seller
+                            if (clientName.equals(record.buyerName)) {
+                                // Store buyer's data
+                                record.buyerCC = ccNumber;
+                                record.buyerExp = ccExpDate;
+                                record.buyerAddress = address;
+                                record.buyerInfoReceived = true;
+                                System.out.println("Buyer info stored for item: " + itemName);
+                            } else if (clientName.equals(record.sellerName)) {
+                                // Store seller's data
+                                record.sellerCC = ccNumber;
+                                record.sellerExp = ccExpDate;
+                                record.sellerAddress = address;
+                                record.sellerInfoReceived = true;
+                                System.out.println("Seller info stored for item: " + itemName);
+                            } else {
+                                System.out.println("INFORM_RES from unknown client: " + clientName);
+                                return;
+                            }
+
+                            // If we have both buyer & seller info, attempt payment
+                            if (record.buyerInfoReceived && record.sellerInfoReceived) {
+                                handlePaymentAndShipping(itemName, record);
+                            }
+                        } catch (IOException e) {
+                            e.printStackTrace();
+                        } finally {
+                            try {
+                                socket.close();
+                            } catch (IOException e) {
+                                // ignore
+                            }
+                        }
+                    }).start();
+                }
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }).start();
     }
 
     // Helper: Send a TCP message to a client
@@ -319,6 +686,25 @@ public class Server implements AuctionFinalizer {
         } catch (IOException e) {
             System.out.println("Error sending TCP message to " + ip + ":" + port);
             e.printStackTrace();
+        }
+    }
+
+    private void sendCancel(String reason, ClientInfo buyerInfo, ClientInfo sellerInfo) {
+        // Generate a unique server request number for the cancellation message.
+        String rq = generateServerRQ();
+        // Construct the CANCEL message.
+        String cancelMsg = String.format("CANCEL %s %s", rq, reason);
+
+        // Send CANCEL to the buyer if available.
+        if (buyerInfo != null) {
+            sendTCPMessage(buyerInfo.getIp(), buyerInfo.getTcpPort(), cancelMsg);
+            System.out.println("Sent CANCEL to buyer: " + buyerInfo.getName() + " -> " + cancelMsg);
+        }
+
+        // Send CANCEL to the seller if available.
+        if (sellerInfo != null) {
+            sendTCPMessage(sellerInfo.getIp(), sellerInfo.getTcpPort(), cancelMsg);
+            System.out.println("Sent CANCEL to seller: " + sellerInfo.getName() + " -> " + cancelMsg);
         }
     }
 
@@ -336,6 +722,25 @@ public class Server implements AuctionFinalizer {
             System.out.println("Error saving auction result to file.");
             e.printStackTrace();
         }
+    }
+
+    private static class FinalizationData {
+        // Buyer data
+        String buyerName;
+        String buyerCC;
+        String buyerExp;
+        String buyerAddress;
+        boolean buyerInfoReceived = false;
+
+        // Seller data
+        String sellerName;
+        String sellerCC;
+        String sellerExp;
+        String sellerAddress;
+        boolean sellerInfoReceived = false;
+
+        // Auction info
+        double finalPrice;
     }
 
     // ----- Inner class: ClientInfo -----
