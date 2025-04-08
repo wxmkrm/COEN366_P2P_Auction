@@ -207,12 +207,25 @@ public class Client {
     // Main method to launch the client
     public static void main(String[] args) {
         try (Scanner scanner = new Scanner(System.in)) {
-            System.out.print("Enter your name: ");
-            String name = scanner.nextLine().trim();
-            System.out.print("Enter your role (buyer/seller): ");
-            String role = scanner.nextLine().trim();
+            String name;
+            String role;
 
-            // Note: We now handle IOException here
+            // Loop until a valid, non-empty name is entered
+            while (true) {
+                System.out.print("Enter your name: ");
+                name = scanner.nextLine().trim();
+                if (!name.isEmpty()) break;
+                System.out.println("Name cannot be empty. Please try again.");
+            }
+
+            // Loop until a valid role is entered
+            while (true) {
+                System.out.print("Enter your role (buyer/seller): ");
+                role = scanner.nextLine().trim().toLowerCase();
+                if (role.equals("buyer") || role.equals("seller")) break;
+                System.out.println("Invalid role. Please enter either 'buyer' or 'seller'.");
+            }
+
             Client client = new Client(name, role);
             client.start();
         } catch (Exception e) {
