@@ -8,6 +8,7 @@ public class Client {
     private DatagramSocket udpSocket;
     private InetAddress serverAddress;
     private int serverPort = 5000;
+    private int nextRq = 1;
     private String name;
     private String role; // buyer or seller
     private ServerSocket tcpServer;
@@ -39,7 +40,8 @@ public class Client {
 
         // 1) Register with the server
         // Format: REGISTER RQ# Name Role IP UDP_Port TCP_Port
-        String registerMessage = String.format("REGISTER 1 %s %s %s %d %d",
+        String registerMessage = String.format("REGISTER %d %s %s %s %d %d",
+                nextRq++,
                 name,
                 role,
                 udpSocket.getLocalAddress().getHostAddress(),
@@ -47,6 +49,11 @@ public class Client {
                 tcpPort
         );
         sendUDPMessage(registerMessage);
+
+        try {
+            Thread.sleep(1000);
+        } catch (InterruptedException e) {
+        }
 
         // Print basic info
         System.out.println("----------------------------------------------------");
@@ -82,9 +89,7 @@ public class Client {
         System.out.println("Client closed.");
     }
 
-    /**
-     * Prints usage instructions depending on the user's role (seller or buyer).
-     */
+    // Prints usage instructions depending on the user's role (seller or buyer).
     private void printRoleInstructions() {
         if (role.equalsIgnoreCase("seller")) {
             System.out.println("--------------- SELLER COMMANDS ---------------");

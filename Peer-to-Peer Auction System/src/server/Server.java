@@ -8,6 +8,15 @@ import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class Server implements AuctionFinalizer {
+    private static class ServerState implements Serializable {
+        private static final long serialVersionUID = 1L;
+        ConcurrentHashMap<String, ClientInfo> clients;
+        // We store auctions as a Map from itemName to Auction.
+        ConcurrentHashMap<String, Auction> activeAuctions;
+        // Subscriptions: itemName -> set of subscriber names.
+        ConcurrentHashMap<String, Set<String>> subscriptions;
+    }
+    private static final String STATE_FILE = "server_state.dat";
     private static final int UDP_PORT = 5000;
     private DatagramSocket socket;
     private ExecutorService executor;
@@ -30,6 +39,8 @@ public class Server implements AuctionFinalizer {
         executor = Executors.newCachedThreadPool();
         auctionManager = new AuctionManager(this); // Server implements AuctionFinalizer
         System.out.println("Server started on UDP port " + UDP_PORT);
+        // Load any persisted state before starting the finalization listener.
+        loadState();
         startFinalizationListener();
     }
 
@@ -43,6 +54,42 @@ public class Server implements AuctionFinalizer {
             } catch (IOException e) {
                 e.printStackTrace();
             }
+        }
+    }
+
+    private synchronized void persistState() {
+        ServerState state = new ServerState();
+        // Create shallow copies so that the state is consistent.
+        state.clients = new ConcurrentHashMap<>(this.clients);
+        // Use AuctionManager's helper method to get the current active auctions.
+        state.activeAuctions = new ConcurrentHashMap<>(auctionManager.getActiveAuctionsMap());
+        state.subscriptions = new ConcurrentHashMap<>(this.subscriptions);
+
+        try (ObjectOutputStream out = new ObjectOutputStream(new FileOutputStream(STATE_FILE))) {
+            out.writeObject(state);
+            System.out.println("Server state persisted successfully.");
+        } catch (IOException e) {
+            System.out.println("Error persisting server state:");
+            e.printStackTrace();
+        }
+    }
+
+    private synchronized void loadState() {
+        File file = new File(STATE_FILE);
+        if (!file.exists()) {
+            System.out.println("No previous server state found; starting fresh.");
+            return;
+        }
+        try (ObjectInputStream in = new ObjectInputStream(new FileInputStream(file))) {
+            ServerState state = (ServerState) in.readObject();
+            // Restore state
+            this.clients = state.clients;
+            this.subscriptions = state.subscriptions;
+            auctionManager.setActiveAuctionsMap(state.activeAuctions);
+            System.out.println("Server state loaded successfully.");
+        } catch (IOException | ClassNotFoundException e) {
+            System.out.println("Error loading server state:");
+            e.printStackTrace();
         }
     }
 
@@ -108,6 +155,7 @@ public class Server implements AuctionFinalizer {
             sendUDPMessage("REGISTER-DENIED " + rq + " Name already registered", packet.getAddress(), packet.getPort());
         } else {
             clients.put(name, clientInfo);
+            persistState();
             sendUDPMessage("REGISTERED " + rq, packet.getAddress(), packet.getPort());
             System.out.println("Registered client: " + name + " as " + role);
         }
@@ -121,6 +169,7 @@ public class Server implements AuctionFinalizer {
         }
         String name = tokens[2];
         clients.remove(name);
+        persistState();
         System.out.println("Deregistered client: " + name);
     }
 
@@ -171,6 +220,7 @@ public class Server implements AuctionFinalizer {
         // Everything is valid; create the auction.
         Auction auction = new Auction(itemName, itemDescription, startPrice, duration, sellerName, packet.getAddress(), 0);
         auctionManager.addAuction(auction);
+        persistState();
         sendUDPMessage("ITEM_LISTED " + rq, packet.getAddress(), packet.getPort());
         System.out.println("Auction listed for item: " + itemName + " by " + sellerName);
 
@@ -261,6 +311,7 @@ public class Server implements AuctionFinalizer {
 
         // Accept the subscription if all checks pass
         subscriberSet.add(clientName);
+        persistState();
         sendUDPMessage("SUBSCRIBED " + rq, packet.getAddress(), packet.getPort());
         System.out.println("Subscription accepted for item: " + itemName + " by " + clientName);
     }
@@ -306,6 +357,7 @@ public class Server implements AuctionFinalizer {
         if (subscriberSet.isEmpty()) {
             subscriptions.remove(itemName);
         }
+        persistState();
 
         // Send confirmation of de-subscription.
         sendUDPMessage("DE-SUBSCRIBED " + rq, packet.getAddress(), packet.getPort());
@@ -401,6 +453,7 @@ public class Server implements AuctionFinalizer {
                 }
             }
             auction.setHighestBidder(bidderName);
+            persistState();
 
             sendUDPMessage("BID_ACCEPTED " + rq, packet.getAddress(), packet.getPort());
 
@@ -479,6 +532,7 @@ public class Server implements AuctionFinalizer {
             }
         }
         System.out.println("Seller accepted negotiation for item: " + itemName + " New Price: " + newPrice);
+        persistState();
     }
 
     private void handleRefuse(String[] tokens, DatagramPacket packet) {
@@ -597,6 +651,7 @@ public class Server implements AuctionFinalizer {
                 System.out.println("Seller info not found for auction NON_OFFER message.");
             }
         }
+        persistState();
     }
 
     private void startFinalizationListener() {
@@ -744,7 +799,8 @@ public class Server implements AuctionFinalizer {
     }
 
     // ----- Inner class: ClientInfo -----
-    private static class ClientInfo {
+    private static class ClientInfo implements Serializable {
+        private static final long serialVersionUID = 1L;
         private String name;
         private String role;
         private String ip;
