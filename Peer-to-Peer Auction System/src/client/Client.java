@@ -13,6 +13,9 @@ public class Client {
     private String role; // buyer or seller
     private ServerSocket tcpServer;
     private int tcpPort;
+    // Constants for multicast discovery
+    private static final String MULTICAST_ADDRESS = "230.0.0.0";
+    private static final int MULTICAST_PORT = 4446;
 
     public Client(String name, String role) throws IOException {
         this.name = name;
@@ -21,8 +24,12 @@ public class Client {
         // Create a UDP socket
         udpSocket = new DatagramSocket();
 
-        // Point to server at localhost (change if needed)
-        serverAddress = InetAddress.getByName("localhost");
+        // Initially, we don't know the server's address.
+        serverAddress = null;
+        serverPort = 0;
+
+        // Start the multicast listener thread to discover the server.
+        startMulticastListener();
 
         // Create a TCP server socket on any available port (can throw IOException)
         tcpServer = new ServerSocket(0);
@@ -35,8 +42,44 @@ public class Client {
         new Thread(new UDPReceiver()).start();
     }
 
+    private void startMulticastListener() {
+        new Thread(() -> {
+            try (MulticastSocket multicastSocket = new MulticastSocket(MULTICAST_PORT)) {
+                InetAddress group = InetAddress.getByName(MULTICAST_ADDRESS);
+                multicastSocket.joinGroup(group);
+                while (true) {
+                    byte[] buffer = new byte[1024];
+                    DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
+                    multicastSocket.receive(packet);
+                    String advertisement = new String(packet.getData(), 0, packet.getLength());
+                    // Expected format: "SERVER_IP <server-ip> <udpPort>"
+                    if (advertisement.startsWith("SERVER_IP")) {
+                        String[] tokens = advertisement.split(" ");
+                        if (tokens.length >= 3) {
+                            String discoveredIp = tokens[1];
+                            int discoveredUdpPort = Integer.parseInt(tokens[2]);
+                            // Update the server address and port.
+                            serverAddress = InetAddress.getByName(discoveredIp);
+                            serverPort = discoveredUdpPort;
+                        }
+                    }
+                }
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        }).start();
+    }
+
     public void start() {
-        Scanner scanner = new Scanner(System.in);
+
+        // Wait until the server advertisement has been received.
+        while (serverAddress == null) {
+            System.out.println("Waiting for server advertisement...");
+            try {
+                Thread.sleep(2000);
+            } catch (InterruptedException e) {
+            }
+        }
 
         // 1) Register with the server
         // Format: REGISTER RQ# Name Role IP UDP_Port TCP_Port
@@ -66,6 +109,7 @@ public class Client {
         printRoleInstructions();
 
         // 3) Command loop
+        Scanner scanner = new Scanner(System.in);
         while (true) {
             System.out.println("\nEnter command (or type EXIT to quit):");
             String input = scanner.nextLine().trim();
