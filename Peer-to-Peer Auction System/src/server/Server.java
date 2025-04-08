@@ -144,7 +144,7 @@ public class Server implements AuctionFinalizer {
         String ip = packet.getAddress().getHostAddress();
         int udpPort, tcpPort;
         try {
-            udpPort = Integer.parseInt(tokens[5]);
+            udpPort = packet.getPort();
             tcpPort = Integer.parseInt(tokens[6]);
         } catch (NumberFormatException e) {
             System.out.println("Invalid port format in REGISTER.");
@@ -152,13 +152,15 @@ public class Server implements AuctionFinalizer {
         }
         ClientInfo clientInfo = new ClientInfo(name, role, ip, udpPort, tcpPort);
         if (clients.containsKey(name)) {
-            sendUDPMessage("REGISTER-DENIED " + rq + " Name already registered", packet.getAddress(), packet.getPort());
+            sendUDPMessage("REGISTER-DENIED " + rq + " Name already registered", packet.getAddress(), udpPort);
+            clients.put(name, new ClientInfo(name, role, ip, udpPort, tcpPort));
+            System.out.println("Refreshed existing client record for " + name);
         } else {
-            clients.put(name, clientInfo);
-            persistState();
+            clients.put(name, new ClientInfo(name, role, ip, udpPort, tcpPort));
             sendUDPMessage("REGISTERED " + rq, packet.getAddress(), packet.getPort());
             System.out.println("Registered client: " + name + " as " + role);
         }
+        persistState();
     }
 
     private void handleDeregister(String[] tokens) {
@@ -203,7 +205,6 @@ public class Server implements AuctionFinalizer {
         int senderPort = packet.getPort();
         String sellerName = null;
         for (ClientInfo info : clients.values()) {
-            // Compare both IP and UDP port.
             if (info.getIp().equals(senderIp) && info.getUdpPort() == senderPort) {
                 sellerName = info.getName();
                 break;

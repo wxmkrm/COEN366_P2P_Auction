@@ -44,7 +44,7 @@ public class Client {
                 nextRq++,
                 name,
                 role,
-                udpSocket.getLocalAddress().getHostAddress(),
+                serverAddress.getHostAddress(),
                 udpSocket.getLocalPort(),
                 tcpPort
         );
