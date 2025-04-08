@@ -8,6 +8,11 @@ import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class Server implements AuctionFinalizer {
+    // Added constants for multicast advertising
+    private static final String MULTICAST_ADDRESS = "230.0.0.0";
+    private static final int MULTICAST_PORT = 4446;
+    // This flag controls the advertisement loop
+    private boolean running = true;
     private static class ServerState implements Serializable {
         private static final long serialVersionUID = 1L;
         ConcurrentHashMap<String, ClientInfo> clients;
@@ -42,6 +47,27 @@ public class Server implements AuctionFinalizer {
         // Load any persisted state before starting the finalization listener.
         loadState();
         startFinalizationListener();
+        // Start the multicast advertiser to broadcast the server's IP and UDP port.
+        startMulticastAdvertiser();
+    }
+
+    private void startMulticastAdvertiser() {
+        executor.execute(() -> {
+            try (MulticastSocket multicastSocket = new MulticastSocket()) {
+                InetAddress group = InetAddress.getByName(MULTICAST_ADDRESS);
+                while (running) {
+                    // Construct a message that includes the server's IP address and UDP port
+                    String message = "SERVER_IP " + InetAddress.getLocalHost().getHostAddress() + " " + socket.getLocalPort();
+                    byte[] buffer = message.getBytes();
+                    DatagramPacket packet = new DatagramPacket(buffer, buffer.length, group, MULTICAST_PORT);
+                    multicastSocket.send(packet);
+                    // Advertise every 5 seconds (adjust as needed)
+                    Thread.sleep(5000);
+                }
+            } catch (IOException | InterruptedException e) {
+                e.printStackTrace();
+            }
+        });
     }
 
     public void start() {
@@ -722,7 +748,6 @@ public class Server implements AuctionFinalizer {
                             try {
                                 socket.close();
                             } catch (IOException e) {
-                                // ignore
                             }
                         }
                     }).start();
