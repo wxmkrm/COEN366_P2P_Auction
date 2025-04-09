@@ -3,6 +3,7 @@ package client;
 import java.io.*;
 import java.net.*;
 import java.util.Scanner;
+import java.util.Enumeration;
 
 public class Client {
     private DatagramSocket udpSocket;
@@ -42,28 +43,57 @@ public class Client {
         new Thread(new UDPReceiver()).start();
     }
 
+    private NetworkInterface getPreferredNetworkInterface() throws SocketException {
+        Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
+        while (interfaces.hasMoreElements()) {
+            NetworkInterface iface = interfaces.nextElement();
+            String displayName = iface.getDisplayName().toLowerCase();
+            // Skip loopback, virtual, or VPN-like interfaces
+            if (iface.isLoopback() || iface.isVirtual() || displayName.contains("nordlynx")) {
+                continue;
+            }
+            if (iface.isUp() && iface.supportsMulticast()) {
+                return iface;
+            }
+        }
+        // Fallback: if nothing is found, return the interface from the default local host
+        try {
+            return NetworkInterface.getByInetAddress(InetAddress.getLocalHost());
+        } catch (UnknownHostException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
     private void startMulticastListener() {
         new Thread(() -> {
             try (MulticastSocket multicastSocket = new MulticastSocket(MULTICAST_PORT)) {
                 InetAddress group = InetAddress.getByName(MULTICAST_ADDRESS);
-                multicastSocket.joinGroup(group);
-                while (true) {
+                NetworkInterface networkInterface = getPreferredNetworkInterface();
+                if (networkInterface == null) {
+                    System.out.println("No suitable network interface found.");
+                    return;
+                }
+                multicastSocket.joinGroup(new InetSocketAddress(group, MULTICAST_PORT), networkInterface);
+                System.out.println("Joined multicast group on interface: " + networkInterface.getDisplayName());
+
+                // Loop until the server address is discovered.
+                while (serverAddress == null) {
                     byte[] buffer = new byte[1024];
                     DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
                     multicastSocket.receive(packet);
                     String advertisement = new String(packet.getData(), 0, packet.getLength());
-                    // Expected format: "SERVER_IP <server-ip> <udpPort>"
                     if (advertisement.startsWith("SERVER_IP")) {
                         String[] tokens = advertisement.split(" ");
                         if (tokens.length >= 3) {
                             String discoveredIp = tokens[1];
                             int discoveredUdpPort = Integer.parseInt(tokens[2]);
-                            // Update the server address and port.
                             serverAddress = InetAddress.getByName(discoveredIp);
                             serverPort = discoveredUdpPort;
+                            System.out.println("Discovered Server: " + serverAddress.getHostAddress() + ", UDP Port: " + serverPort);
                         }
                     }
                 }
+                // Exiting the loop stops further printing.
             } catch (IOException e) {
                 e.printStackTrace();
             }
@@ -226,7 +256,7 @@ public class Client {
                             String informResMsg = String.format("INFORM_RES %s %s %s %s %s", rq, userName, ccNumber, ccExpDate, address);
 
                             // Send the INFORM_RES back to the server's finalization listener
-                            try (Socket responseSocket = new Socket("localhost", 6000);
+                            try (Socket responseSocket = new Socket(serverAddress, 6000);
                                  PrintWriter out = new PrintWriter(responseSocket.getOutputStream(), true)) {
                                 out.println(informResMsg);
                                 System.out.println("Sent INFORM_RES: " + informResMsg);
