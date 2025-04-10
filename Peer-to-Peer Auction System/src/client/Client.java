@@ -3,6 +3,8 @@ package client;
 import java.io.*;
 import java.net.*;
 import java.util.Scanner;
+import java.util.List;
+import network.NetworkConfig;
 
 public class Client {
     private DatagramSocket udpSocket;
@@ -12,18 +14,20 @@ public class Client {
     private String role; // buyer or seller
     private ServerSocket tcpServer;
     private int tcpPort;
+    private NetworkConfig networkConfig;
 
     public Client(String name, String role) throws IOException {
         this.name = name;
         this.role = role;
+        this.networkConfig = NetworkConfig.getInstance();
 
         // Create a UDP socket
         udpSocket = new DatagramSocket();
 
-        // Point to server at localhost (change if needed)
-        serverAddress = InetAddress.getByName("localhost");
+        // Discover server using network discovery
+        discoverServer();
 
-        // Create a TCP server socket on any available port (can throw IOException)
+        // Create a TCP server socket on any available port
         tcpServer = new ServerSocket(0);
         tcpPort = tcpServer.getLocalPort();
 
@@ -34,15 +38,76 @@ public class Client {
         new Thread(new UDPReceiver()).start();
     }
 
+    private void discoverServer() {
+        System.out.println("\n=== Network Discovery Started ===");
+        System.out.println("Local network information:");
+        networkConfig.printNetworkInfo();
+        System.out.println("Discovering server on the network...");
+        networkConfig.refreshNetworkInfo();
+        
+        // Print all available network interfaces for debugging
+        try {
+            System.out.println("\n=== Available Network Interfaces ===");
+            NetworkInterface.getNetworkInterfaces().asIterator().forEachRemaining(ni -> {
+                try {
+                    if (ni.isUp() && !ni.isLoopback()) {
+                        System.out.println("Interface: " + ni.getDisplayName());
+                        ni.getInterfaceAddresses().forEach(addr -> 
+                            System.out.println("  Address: " + addr.getAddress().getHostAddress()));
+                    }
+                } catch (SocketException e) {
+                    e.printStackTrace();
+                }
+            });
+            System.out.println("================================\n");
+        } catch (SocketException e) {
+            System.err.println("Failed to enumerate network interfaces: " + e.getMessage());
+        }
+        
+        List<String> peers = networkConfig.getDiscoveredPeers();
+        if (!peers.isEmpty()) {
+            System.out.println("Discovered peers: " + String.join(", ", peers));
+            // Use the first discovered peer as the server
+            try {
+                serverAddress = InetAddress.getByName(peers.get(0));
+                System.out.println("Found server at: " + serverAddress.getHostAddress());
+            } catch (UnknownHostException e) {
+                System.err.println("Failed to resolve server address, falling back to localhost");
+                useLocalhostAsServer();
+            }
+        } else {
+            System.out.println("No server found on network, using localhost");
+            useLocalhostAsServer();
+        }
+        System.out.println("=== Network Discovery Completed ===\n");
+    }
+
+    private void useLocalhostAsServer() {
+        try {
+            serverAddress = InetAddress.getLocalHost();
+        } catch (UnknownHostException e) {
+            System.err.println("Failed to get localhost, using 127.0.0.1");
+            try {
+                serverAddress = InetAddress.getByName("127.0.0.1");
+            } catch (UnknownHostException ex) {
+                System.err.println("Critical error: Could not resolve any IP address");
+                System.exit(1);
+            }
+        }
+    }
+
     public void start() {
         Scanner scanner = new Scanner(System.in);
+
+        // Print network information
+        networkConfig.printNetworkInfo();
 
         // 1) Register with the server
         // Format: REGISTER RQ# Name Role IP UDP_Port TCP_Port
         String registerMessage = String.format("REGISTER 1 %s %s %s %d %d",
                 name,
                 role,
-                udpSocket.getLocalAddress().getHostAddress(),
+                networkConfig.getLocalIpAddress(),
                 udpSocket.getLocalPort(),
                 tcpPort
         );
@@ -52,6 +117,7 @@ public class Client {
         System.out.println("----------------------------------------------------");
         System.out.println("Registered as " + name + " with role " + role);
         System.out.println("Server IP: " + serverAddress.getHostAddress() + ", UDP Port: " + serverPort);
+        System.out.println("Your IP: " + networkConfig.getLocalIpAddress());
         System.out.println("Your TCP listening port: " + tcpPort);
         System.out.println("----------------------------------------------------");
 
