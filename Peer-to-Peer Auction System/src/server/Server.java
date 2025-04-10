@@ -93,7 +93,6 @@ public class Server implements AuctionFinalizer {
 
         try (ObjectOutputStream out = new ObjectOutputStream(new FileOutputStream(STATE_FILE))) {
             out.writeObject(state);
-            System.out.println("Server state persisted successfully.");
         } catch (IOException e) {
             System.out.println("Error persisting server state:");
             e.printStackTrace();
