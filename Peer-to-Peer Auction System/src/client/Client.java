@@ -207,6 +207,10 @@ public class Client {
             System.out.println("When asked for price negotiation (if applicable):");
             System.out.println("  ACCEPT <RQ#> <ItemName> <New_Price>   - to lower the price");
             System.out.println("  REFUSE <RQ#> <ItemName> REJECT        - to decline negotiation");
+            System.out.println();
+            System.out.println("When asked for price negotiation (if applicable):");
+            System.out.println("  ACCEPT <RQ#> <ItemName> <New_Price>   - to lower the price");
+            System.out.println("  REFUSE <RQ#> <ItemName> REJECT        - to decline negotiation");
             System.out.println("----------------------------------------------");
         } else if (role.equalsIgnoreCase("buyer")) {
             System.out.println("--------------- BUYER COMMANDS ---------------");
