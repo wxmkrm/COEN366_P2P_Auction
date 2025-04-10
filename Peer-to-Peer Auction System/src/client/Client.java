@@ -4,6 +4,8 @@ import java.io.*;
 import java.net.*;
 import java.util.Scanner;
 import java.util.Enumeration;
+import java.util.List;
+import network.NetworkConfig;
 
 public class Client {
     private DatagramSocket udpSocket;
@@ -14,23 +16,28 @@ public class Client {
     private String role; // buyer or seller
     private ServerSocket tcpServer;
     private int tcpPort;
+    private NetworkConfig networkConfig;
     // Constants for multicast discovery
-    private static final String MULTICAST_ADDRESS = "230.0.0.0";
-    private static final int MULTICAST_PORT = 4446;
+//    private static final String MULTICAST_ADDRESS = "230.0.0.0";
+//    private static final int MULTICAST_PORT = 4446;
 
     public Client(String name, String role) throws IOException {
         this.name = name;
         this.role = role;
+        this.networkConfig = NetworkConfig.getInstance();
 
         // Create a UDP socket
         udpSocket = new DatagramSocket();
 
+        // Discover server using network discovery
+        discoverServer();
+
         // Initially, we don't know the server's address.
-        serverAddress = null;
-        serverPort = 0;
+        //serverAddress = null;
+        //serverPort = 0;
 
         // Start the multicast listener thread to discover the server.
-        startMulticastListener();
+        //startMulticastListener();
 
         // Create a TCP server socket on any available port (can throw IOException)
         tcpServer = new ServerSocket(0);
@@ -43,73 +50,134 @@ public class Client {
         new Thread(new UDPReceiver()).start();
     }
 
-    private NetworkInterface getPreferredNetworkInterface() throws SocketException {
-        Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
-        while (interfaces.hasMoreElements()) {
-            NetworkInterface iface = interfaces.nextElement();
-            String displayName = iface.getDisplayName().toLowerCase();
-            // Skip loopback, virtual, or VPN-like interfaces
-            if (iface.isLoopback() || iface.isVirtual() || displayName.contains("nordlynx")) {
-                continue;
-            }
-            if (iface.isUp() && iface.supportsMulticast()) {
-                return iface;
-            }
-        }
-        // Fallback: if nothing is found, return the interface from the default local host
+    private void discoverServer() {
+        System.out.println("\n=== Network Discovery Started ===");
+        System.out.println("Local network information:");
+        networkConfig.printNetworkInfo();
+        System.out.println("Discovering server on the network...");
+        networkConfig.refreshNetworkInfo();
+
+        // Print all available network interfaces for debugging
         try {
-            return NetworkInterface.getByInetAddress(InetAddress.getLocalHost());
+            System.out.println("\n=== Available Network Interfaces ===");
+            NetworkInterface.getNetworkInterfaces().asIterator().forEachRemaining(ni -> {
+                try {
+                    if (ni.isUp() && !ni.isLoopback()) {
+                        System.out.println("Interface: " + ni.getDisplayName());
+                        ni.getInterfaceAddresses().forEach(addr ->
+                                System.out.println("  Address: " + addr.getAddress().getHostAddress()));
+                    }
+                } catch (SocketException e) {
+                    e.printStackTrace();
+                }
+            });
+            System.out.println("================================\n");
+        } catch (SocketException e) {
+            System.err.println("Failed to enumerate network interfaces: " + e.getMessage());
+        }
+
+        List<String> peers = networkConfig.getDiscoveredPeers();
+        if (!peers.isEmpty()) {
+            System.out.println("Discovered peers: " + String.join(", ", peers));
+            // Use the first discovered peer as the server
+            try {
+                serverAddress = InetAddress.getByName(peers.get(0));
+                System.out.println("Found server at: " + serverAddress.getHostAddress());
+            } catch (UnknownHostException e) {
+                System.err.println("Failed to resolve server address, falling back to localhost");
+                useLocalhostAsServer();
+            }
+        } else {
+            System.out.println("No server found on network, using localhost");
+            useLocalhostAsServer();
+        }
+        System.out.println("=== Network Discovery Completed ===\n");
+    }
+
+    private void useLocalhostAsServer() {
+        try {
+            serverAddress = InetAddress.getLocalHost();
         } catch (UnknownHostException e) {
-            throw new RuntimeException(e);
+            System.err.println("Failed to get localhost, using 127.0.0.1");
+            try {
+                serverAddress = InetAddress.getByName("127.0.0.1");
+            } catch (UnknownHostException ex) {
+                System.err.println("Critical error: Could not resolve any IP address");
+                System.exit(1);
+            }
         }
     }
 
-    private void startMulticastListener() {
-        new Thread(() -> {
-            try (MulticastSocket multicastSocket = new MulticastSocket(MULTICAST_PORT)) {
-                InetAddress group = InetAddress.getByName(MULTICAST_ADDRESS);
-                NetworkInterface networkInterface = getPreferredNetworkInterface();
-                if (networkInterface == null) {
-                    System.out.println("No suitable network interface found.");
-                    return;
-                }
-                multicastSocket.joinGroup(new InetSocketAddress(group, MULTICAST_PORT), networkInterface);
-                System.out.println("Joined multicast group on interface: " + networkInterface.getDisplayName());
+//    private NetworkInterface getPreferredNetworkInterface() throws SocketException {
+//        Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
+//        while (interfaces.hasMoreElements()) {
+//            NetworkInterface iface = interfaces.nextElement();
+//            String displayName = iface.getDisplayName().toLowerCase();
+//            // Skip loopback, virtual, or VPN-like interfaces
+//            if (iface.isLoopback() || iface.isVirtual() || displayName.contains("nordlynx")) {
+//                continue;
+//            }
+//            if (iface.isUp() && iface.supportsMulticast()) {
+//                return iface;
+//            }
+//        }
+//        // Fallback: if nothing is found, return the interface from the default local host
+//        try {
+//            return NetworkInterface.getByInetAddress(InetAddress.getLocalHost());
+//        } catch (UnknownHostException e) {
+//            throw new RuntimeException(e);
+//        }
+//    }
 
-                // Loop until the server address is discovered.
-                while (serverAddress == null) {
-                    byte[] buffer = new byte[1024];
-                    DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
-                    multicastSocket.receive(packet);
-                    String advertisement = new String(packet.getData(), 0, packet.getLength());
-                    if (advertisement.startsWith("SERVER_IP")) {
-                        String[] tokens = advertisement.split(" ");
-                        if (tokens.length >= 3) {
-                            String discoveredIp = tokens[1];
-                            int discoveredUdpPort = Integer.parseInt(tokens[2]);
-                            serverAddress = InetAddress.getByName(discoveredIp);
-                            serverPort = discoveredUdpPort;
-                            System.out.println("Discovered Server: " + serverAddress.getHostAddress() + ", UDP Port: " + serverPort);
-                        }
-                    }
-                }
-                // Exiting the loop stops further printing.
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
-        }).start();
-    }
+//    private void startMulticastListener() {
+//        new Thread(() -> {
+//            try (MulticastSocket multicastSocket = new MulticastSocket(MULTICAST_PORT)) {
+//                InetAddress group = InetAddress.getByName(MULTICAST_ADDRESS);
+//                NetworkInterface networkInterface = getPreferredNetworkInterface();
+//                if (networkInterface == null) {
+//                    System.out.println("No suitable network interface found.");
+//                    return;
+//                }
+//                multicastSocket.joinGroup(new InetSocketAddress(group, MULTICAST_PORT), networkInterface);
+//                System.out.println("Joined multicast group on interface: " + networkInterface.getDisplayName());
+//
+//                // Loop until the server address is discovered.
+//                while (serverAddress == null) {
+//                    byte[] buffer = new byte[1024];
+//                    DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
+//                    multicastSocket.receive(packet);
+//                    String advertisement = new String(packet.getData(), 0, packet.getLength());
+//                    if (advertisement.startsWith("SERVER_IP")) {
+//                        String[] tokens = advertisement.split(" ");
+//                        if (tokens.length >= 3) {
+//                            String discoveredIp = tokens[1];
+//                            int discoveredUdpPort = Integer.parseInt(tokens[2]);
+//                            serverAddress = InetAddress.getByName(discoveredIp);
+//                            serverPort = discoveredUdpPort;
+//                            System.out.println("Discovered Server: " + serverAddress.getHostAddress() + ", UDP Port: " + serverPort);
+//                        }
+//                    }
+//                }
+//                // Exiting the loop stops further printing.
+//            } catch (IOException e) {
+//                e.printStackTrace();
+//            }
+//        }).start();
+//    }
 
     public void start() {
 
         // Wait until the server advertisement has been received.
-        while (serverAddress == null) {
-            System.out.println("Waiting for server advertisement...");
-            try {
-                Thread.sleep(3000);
-            } catch (InterruptedException e) {
-            }
-        }
+//        while (serverAddress == null) {
+//            System.out.println("Waiting for server advertisement...");
+//            try {
+//                Thread.sleep(3000);
+//            } catch (InterruptedException e) {
+//            }
+//        }
+
+        // Print network information
+        networkConfig.printNetworkInfo();
 
         // 1) Register with the server
         // Format: REGISTER RQ# Name Role IP UDP_Port TCP_Port
@@ -117,21 +185,23 @@ public class Client {
                 nextRq++,
                 name,
                 role,
-                serverAddress.getHostAddress(),
+                networkConfig.getLocalIpAddress(),
+                /*serverAddress.getHostAddress(),*/
                 udpSocket.getLocalPort(),
                 tcpPort
         );
         sendUDPMessage(registerMessage);
 
-        try {
-            Thread.sleep(1000);
-        } catch (InterruptedException e) {
-        }
+//        try {
+//            Thread.sleep(1000);
+//        } catch (InterruptedException e) {
+//        }
 
         // Print basic info
         System.out.println("----------------------------------------------------");
         System.out.println("Registered as " + name + " with role " + role);
         System.out.println("Server IP: " + serverAddress.getHostAddress() + ", UDP Port: " + serverPort);
+        System.out.println("Your IP: " + networkConfig.getLocalIpAddress());
         System.out.println("Your TCP listening port: " + tcpPort);
         System.out.println("----------------------------------------------------");
 

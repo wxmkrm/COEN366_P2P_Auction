@@ -6,13 +6,15 @@ import java.time.LocalDateTime;
 import java.util.concurrent.*;
 import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import network.NetworkConfig;
+import network.NetworkDiscovery;
 
 public class Server implements AuctionFinalizer {
-    // Added constants for multicast advertising
-    private static final String MULTICAST_ADDRESS = "230.0.0.0";
-    private static final int MULTICAST_PORT = 4446;
-    // This flag controls the advertisement loop
-    private boolean running = true;
+//    // Added constants for multicast advertising
+//    private static final String MULTICAST_ADDRESS = "230.0.0.0";
+//    private static final int MULTICAST_PORT = 4446;
+//    // This flag controls the advertisement loop
+//    private boolean running = true;
     private static class ServerState implements Serializable {
         private static final long serialVersionUID = 1L;
         ConcurrentHashMap<String, ClientInfo> clients;
@@ -26,6 +28,7 @@ public class Server implements AuctionFinalizer {
     private DatagramSocket socket;
     private ExecutorService executor;
     private AuctionManager auctionManager;
+    private NetworkConfig networkConfig;
     // In-memory registration of clients: name -> ClientInfo
     private ConcurrentHashMap<String, ClientInfo> clients = new ConcurrentHashMap<>();
     private ConcurrentHashMap<String, Set<String>> subscriptions = new ConcurrentHashMap<>();
@@ -43,32 +46,39 @@ public class Server implements AuctionFinalizer {
         socket = new DatagramSocket(UDP_PORT);
         executor = Executors.newCachedThreadPool();
         auctionManager = new AuctionManager(this); // Server implements AuctionFinalizer
+        networkConfig = NetworkConfig.getInstance();
+
+        // Print network information
+        networkConfig.printNetworkInfo();
+        // Start discovery responder
+        startDiscoveryResponder();
+
         System.out.println("Server started on UDP port " + UDP_PORT);
         // Load any persisted state before starting the finalization listener.
         loadState();
         startFinalizationListener();
         // Start the multicast advertiser to broadcast the server's IP and UDP port.
-        startMulticastAdvertiser();
+        //startMulticastAdvertiser();
     }
 
-    private void startMulticastAdvertiser() {
-        executor.execute(() -> {
-            try (MulticastSocket multicastSocket = new MulticastSocket()) {
-                InetAddress group = InetAddress.getByName(MULTICAST_ADDRESS);
-                while (running) {
-                    // Construct a message that includes the server's IP address and UDP port
-                    String message = "SERVER_IP " + InetAddress.getLocalHost().getHostAddress() + " " + socket.getLocalPort();
-                    byte[] buffer = message.getBytes();
-                    DatagramPacket packet = new DatagramPacket(buffer, buffer.length, group, MULTICAST_PORT);
-                    multicastSocket.send(packet);
-                    // Advertise every 5 seconds (adjust as needed)
-                    Thread.sleep(5000);
-                }
-            } catch (IOException | InterruptedException e) {
-                e.printStackTrace();
-            }
-        });
-    }
+//    private void startMulticastAdvertiser() {
+//        executor.execute(() -> {
+//            try (MulticastSocket multicastSocket = new MulticastSocket()) {
+//                InetAddress group = InetAddress.getByName(MULTICAST_ADDRESS);
+//                while (running) {
+//                    // Construct a message that includes the server's IP address and UDP port
+//                    String message = "SERVER_IP " + InetAddress.getLocalHost().getHostAddress() + " " + socket.getLocalPort();
+//                    byte[] buffer = message.getBytes();
+//                    DatagramPacket packet = new DatagramPacket(buffer, buffer.length, group, MULTICAST_PORT);
+//                    multicastSocket.send(packet);
+//                    // Advertise every 5 seconds (adjust as needed)
+//                    Thread.sleep(5000);
+//                }
+//            } catch (IOException | InterruptedException e) {
+//                e.printStackTrace();
+//            }
+//        });
+//    }
 
     public void start() {
         while (true) {
@@ -169,7 +179,8 @@ public class Server implements AuctionFinalizer {
         String ip = packet.getAddress().getHostAddress();
         int udpPort, tcpPort;
         try {
-            udpPort = packet.getPort();
+            //udpPort = packet.getPort();
+            udpPort = Integer.parseInt(tokens[5]);
             tcpPort = Integer.parseInt(tokens[6]);
         } catch (NumberFormatException e) {
             System.out.println("Invalid port format in REGISTER.");
@@ -177,13 +188,15 @@ public class Server implements AuctionFinalizer {
         }
         ClientInfo clientInfo = new ClientInfo(name, role, ip, udpPort, tcpPort);
         if (clients.containsKey(name)) {
-            sendUDPMessage("REGISTER-DENIED " + rq + " Name already registered", packet.getAddress(), udpPort);
+            sendUDPMessage("REGISTER-DENIED " + rq + " Name already registered", packet.getAddress(),/*updPort*/ packet.getPort());
             clients.put(name, new ClientInfo(name, role, ip, udpPort, tcpPort));
             System.out.println("Refreshed existing client record for " + name);
+            printConnectedClients();
         } else {
             clients.put(name, new ClientInfo(name, role, ip, udpPort, tcpPort));
             sendUDPMessage("REGISTERED " + rq, packet.getAddress(), packet.getPort());
             System.out.println("Registered client: " + name + " as " + role);
+            printConnectedClients();
         }
         persistState();
     }
@@ -198,6 +211,7 @@ public class Server implements AuctionFinalizer {
         clients.remove(name);
         persistState();
         System.out.println("Deregistered client: " + name);
+        printConnectedClients();
     }
 
     private void handleListItem(String[] tokens, DatagramPacket packet) {
@@ -814,6 +828,84 @@ public class Server implements AuctionFinalizer {
             System.out.println("Error saving auction result to file.");
             e.printStackTrace();
         }
+    }
+
+    private void printConnectedClients() {
+        System.out.println("\n=== Connected Clients ===");
+        if (clients.isEmpty()) {
+            System.out.println("No clients connected");
+        } else {
+            clients.forEach((name, info) -> {
+                System.out.printf("Client: %s (%s)\n", name, info.getRole());
+                System.out.printf("  IP: %s, UDP Port: %d, TCP Port: %d\n",
+                        info.getIp(), info.getUdpPort(), info.getTcpPort());
+            });
+        }
+        System.out.println("=====================\n");
+    }
+
+    private void startDiscoveryResponder() {
+        new Thread(() -> {
+            try (MulticastSocket socket = new MulticastSocket(NetworkDiscovery.getDiscoveryPort())) {
+                InetAddress group = InetAddress.getByName("230.0.0.1");
+                SocketAddress groupAddress = new InetSocketAddress(group, NetworkDiscovery.getDiscoveryPort());
+
+                // Print all available network interfaces for debugging
+                System.out.println("\n=== Available Network Interfaces ===");
+                NetworkInterface.getNetworkInterfaces().asIterator().forEachRemaining(ni -> {
+                    try {
+                        if (ni.isUp() && !ni.isLoopback()) {
+                            System.out.println("Interface: " + ni.getDisplayName());
+                            ni.getInterfaceAddresses().forEach(addr ->
+                                    System.out.println("  Address: " + addr.getAddress().getHostAddress()));
+                        }
+                    } catch (SocketException e) {
+                        e.printStackTrace();
+                    }
+                });
+                System.out.println("================================\n");
+
+                NetworkInterface networkInterface = NetworkInterface.getByInetAddress(
+                        InetAddress.getByName(networkConfig.getLocalIpAddress())
+                );
+                socket.joinGroup(groupAddress, networkInterface);
+
+                System.out.println("Discovery responder started on port " + NetworkDiscovery.getDiscoveryPort());
+                System.out.println("Listening for discovery messages...");
+
+                byte[] buffer = new byte[1024];
+                DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
+
+                while (!Thread.currentThread().isInterrupted()) {
+                    try {
+                        socket.receive(packet);
+                        String message = new String(packet.getData(), 0, packet.getLength());
+                        System.out.println("Received discovery message from: " + packet.getAddress().getHostAddress());
+
+                        if (message.equals(NetworkDiscovery.getDiscoveryMessage())) {
+                            // Send response with server's IP
+                            String response = networkConfig.getLocalIpAddress();
+                            byte[] responseData = response.getBytes();
+                            DatagramPacket responsePacket = new DatagramPacket(
+                                    responseData,
+                                    responseData.length,
+                                    packet.getAddress(),
+                                    packet.getPort()
+                            );
+                            socket.send(responsePacket);
+                            System.out.println("Sent discovery response to: " + packet.getAddress().getHostAddress());
+                        }
+                    } catch (IOException e) {
+                        if (!socket.isClosed()) {
+                            System.err.println("Error in discovery responder: " + e.getMessage());
+                        }
+                    }
+                }
+            } catch (IOException e) {
+                System.err.println("Failed to start discovery responder: " + e.getMessage());
+                e.printStackTrace();
+            }
+        }, "DiscoveryResponder").start();
     }
 
     private static class FinalizationData {
