@@ -106,7 +106,7 @@ public class Client {
         while (serverAddress == null) {
             System.out.println("Waiting for server advertisement...");
             try {
-                Thread.sleep(2000);
+                Thread.sleep(3000);
             } catch (InterruptedException e) {
             }
         }
@@ -165,20 +165,44 @@ public class Client {
 
     // Prints usage instructions depending on the user's role (seller or buyer).
     private void printRoleInstructions() {
+        // General Commands (Common to both buyers and sellers)
+        System.out.println("--------------- GENERAL COMMANDS ---------------");
+        System.out.println("To register with the server:");
+        System.out.println("  REGISTER <RQ#> <Name> <Role> <IP Address> <UDP Socket#> <TCP Socket#>");
+        System.out.println("Example:");
+        System.out.println("  REGISTER 1 Ryan seller 192.168.0.200 52529 6000");
+        System.out.println();
+        System.out.println("To de-register from the server:");
+        System.out.println("  DE-REGISTER <RQ#> <Name>");
+        System.out.println("Example:");
+        System.out.println("  DE-REGISTER 2 Ryan");
+        System.out.println("----------------------------------------------");
+
+        // Role-Specific Commands
         if (role.equalsIgnoreCase("seller")) {
             System.out.println("--------------- SELLER COMMANDS ---------------");
             System.out.println("To list an item for auction:");
             System.out.println("  LIST_ITEM <RQ#> <ItemName> <ItemDescription> <StartPrice> <DurationInSeconds>");
             System.out.println("Example:");
             System.out.println("  LIST_ITEM 3 phone Smartphone 100.0 60");
+            System.out.println();
+            System.out.println("When asked for price negotiation (if applicable):");
+            System.out.println("  ACCEPT <RQ#> <ItemName> <New_Price>   - to lower the price");
+            System.out.println("  REFUSE <RQ#> <ItemName> REJECT        - to decline negotiation");
             System.out.println("----------------------------------------------");
         } else if (role.equalsIgnoreCase("buyer")) {
             System.out.println("--------------- BUYER COMMANDS ---------------");
-            System.out.println("To subscribe to an item:");
+            System.out.println("To subscribe to an item for auction updates:");
             System.out.println("  SUBSCRIBE <RQ#> <ItemName>");
             System.out.println("Example:");
             System.out.println("  SUBSCRIBE 5 phone");
-            System.out.println("\nTo place a bid:");
+            System.out.println();
+            System.out.println("To de-subscribe from an item:");
+            System.out.println("  DE-SUBSCRIBE <RQ#> <ItemName>");
+            System.out.println("Example:");
+            System.out.println("  DE-SUBSCRIBE 6 phone");
+            System.out.println();
+            System.out.println("To place a bid on an item:");
             System.out.println("  BID <RQ#> <ItemName> <BidAmount>");
             System.out.println("Example:");
             System.out.println("  BID 10 phone 120.0");
