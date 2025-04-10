@@ -676,6 +676,19 @@ public class Server implements AuctionFinalizer {
             } else {
                 System.out.println("Seller info not found for auction NON_OFFER message.");
             }
+
+            // Notify all subscribed buyers that the auction is closed
+            Set<String> subscriberSet = subscriptions.get(itemName);
+            if (subscriberSet != null && !subscriberSet.isEmpty()) {
+                for (String buyerName : subscriberSet) {
+                    ClientInfo buyerInfo = clients.get(buyerName);
+                    if (buyerInfo != null) {
+                        String rqBuyer = generateServerRQ();
+                        String nonOfferMsgBuyer = String.format("AUCTION_ENDED %s %s", rqBuyer, itemName);
+                        sendTCPMessage(buyerInfo.getIp(), buyerInfo.getTcpPort(), nonOfferMsgBuyer);
+                    }
+                }
+            }
         }
         persistState();
     }
