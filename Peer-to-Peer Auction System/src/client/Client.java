@@ -106,7 +106,7 @@ public class Client {
         while (serverAddress == null) {
             System.out.println("Waiting for server advertisement...");
             try {
-                Thread.sleep(2000);
+                Thread.sleep(3000);
             } catch (InterruptedException e) {
             }
         }
@@ -145,11 +145,24 @@ public class Client {
             String input = scanner.nextLine().trim();
             if (input.equalsIgnoreCase("EXIT")) {
                 // De-register from the server
-                sendUDPMessage("DE-REGISTER 2 " + name);
+                sendUDPMessage("DE-REGISTER 666 " + name);
                 break;
             }
             if (!input.isEmpty()) {
-                sendUDPMessage(input);
+                // If the command starts with INFORM_RES, send it via TCP to server's finalization listener.
+                if (input.startsWith("INFORM_RES")) {
+                    try (Socket responseSocket = new Socket(serverAddress, 6000);
+                         PrintWriter out = new PrintWriter(responseSocket.getOutputStream(), true)) {
+                        out.println(input);
+                        System.out.println("Sent INFORM_RES: " + input);
+                    } catch (IOException e) {
+                        System.out.println("Error sending INFORM_RES:");
+                        e.printStackTrace();
+                    }
+                } else {
+                    // For all other commands, use UDP as before.
+                    sendUDPMessage(input);
+                }
             }
         }
 
@@ -165,23 +178,52 @@ public class Client {
 
     // Prints usage instructions depending on the user's role (seller or buyer).
     private void printRoleInstructions() {
+        // General Commands (Common to both buyers and sellers)
+        System.out.println("--------------- GENERAL COMMANDS ---------------");
+        System.out.println("To register with the server:");
+        System.out.println("  REGISTER <RQ#> <Name> <Role> <IP Address> <UDP Socket#> <TCP Socket#>");
+        System.out.println("Example:");
+        System.out.println("  REGISTER 1 Ryan seller 192.168.0.200 52529 6000");
+        System.out.println();
+        System.out.println("To de-register from the server:");
+        System.out.println("  DE-REGISTER <RQ#> <Name>");
+        System.out.println("Example:");
+        System.out.println("  DE-REGISTER 2 Ryan");
+        System.out.println();
+        System.out.println("To respond to a finalization request:");
+        System.out.println("  INFORM_RES <RQ#> <Name> <CC#> <CC_Exp_Date> <Address>");
+        System.out.println("Example:");
+        System.out.println("  INFORM_RES 3 Buyer2 1234567890123456 12/25 123_Main_St_Montreal_QC_H3J1N5_Canada");
+        System.out.println("----------------------------------------------");
+
+        // Role-Specific Commands
         if (role.equalsIgnoreCase("seller")) {
             System.out.println("--------------- SELLER COMMANDS ---------------");
             System.out.println("To list an item for auction:");
             System.out.println("  LIST_ITEM <RQ#> <ItemName> <ItemDescription> <StartPrice> <DurationInSeconds>");
             System.out.println("Example:");
-            System.out.println("  LIST_ITEM 3 phone Smartphone 100.0 60");
+            System.out.println("  LIST_ITEM 4 phone Smartphone 100.0 60");
+            System.out.println();
+            System.out.println("When asked for price negotiation (if applicable):");
+            System.out.println("  ACCEPT <RQ#> <ItemName> <New_Price>   - to lower the price");
+            System.out.println("  REFUSE <RQ#> <ItemName> REJECT        - to decline negotiation");
             System.out.println("----------------------------------------------");
         } else if (role.equalsIgnoreCase("buyer")) {
             System.out.println("--------------- BUYER COMMANDS ---------------");
-            System.out.println("To subscribe to an item:");
+            System.out.println("To subscribe to an item for auction updates:");
             System.out.println("  SUBSCRIBE <RQ#> <ItemName>");
             System.out.println("Example:");
             System.out.println("  SUBSCRIBE 5 phone");
-            System.out.println("\nTo place a bid:");
+            System.out.println();
+            System.out.println("To de-subscribe from an item:");
+            System.out.println("  DE-SUBSCRIBE <RQ#> <ItemName>");
+            System.out.println("Example:");
+            System.out.println("  DE-SUBSCRIBE 6 phone");
+            System.out.println();
+            System.out.println("To place a bid on an item:");
             System.out.println("  BID <RQ#> <ItemName> <BidAmount>");
             System.out.println("Example:");
-            System.out.println("  BID 10 phone 120.0");
+            System.out.println("  BID 7 phone 120.0");
             System.out.println("----------------------------------------------");
         }
     }
@@ -218,7 +260,6 @@ public class Client {
     // Thread that listens for TCP finalization messages from the server
     private class TCPListener implements Runnable {
         public void run() {
-            Scanner inputScanner = new Scanner(System.in); // Create a Scanner for user input
             while (!tcpServer.isClosed()) {
                 try {
                     Socket tcpSocket = tcpServer.accept();
@@ -237,33 +278,6 @@ public class Client {
 
                             System.out.println("Auction for item '" + itemName + "' has closed at price " + finalPrice + ".");
                             System.out.println("Please provide your payment and shipping details.");
-
-                            // Prompt the user for the required details
-                            System.out.print("Enter your name: ");
-                            String userName = inputScanner.nextLine();
-
-                            System.out.print("Enter your credit card number: ");
-                            String ccNumber = inputScanner.nextLine();
-
-                            System.out.print("Enter your credit card expiration date (MM/YY): ");
-                            String ccExpDate = inputScanner.nextLine();
-
-                            System.out.print("Enter your shipping address: ");
-                            String address = inputScanner.nextLine();
-
-                            // Construct the INFORM_RES message
-                            // Format: INFORM_RES RQ# Name CC# CC_Exp_Date Address
-                            String informResMsg = String.format("INFORM_RES %s %s %s %s %s", rq, userName, ccNumber, ccExpDate, address);
-
-                            // Send the INFORM_RES back to the server's finalization listener
-                            try (Socket responseSocket = new Socket(serverAddress, 6000);
-                                 PrintWriter out = new PrintWriter(responseSocket.getOutputStream(), true)) {
-                                out.println(informResMsg);
-                                System.out.println("Sent INFORM_RES: " + informResMsg);
-                            } catch (IOException e) {
-                                System.out.println("Error sending INFORM_RES:");
-                                e.printStackTrace();
-                            }
                         } else {
                             System.out.println("Malformed INFORM_REQ message.");
                         }

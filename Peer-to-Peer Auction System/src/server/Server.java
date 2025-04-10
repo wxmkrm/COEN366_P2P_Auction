@@ -591,7 +591,6 @@ public class Server implements AuctionFinalizer {
         // 2) If payment succeeds, credit the seller with 90%
         double sellerAmount = record.finalPrice * 0.90;
         System.out.println("Crediting seller with 90% of price: " + sellerAmount + ", retaining 10% as fee.");
-        // In a real system, you’d call an API or do something with seller’s CC here.
 
         // 3) Send shipping info to the seller
         // Format: Shipping_Info RQ# Name Winner_Address
