@@ -33,6 +33,17 @@ public class AuctionManager {
         return activeAuctions.get(itemName);
     }
 
+    // Returns a copy of the active auctions map.
+    public Map<String, Auction> getActiveAuctionsMap() {
+        return new ConcurrentHashMap<>(activeAuctions);
+    }
+
+    // Replaces the current active auctions with the provided map.
+    public void setActiveAuctionsMap(Map<String, Auction> auctions) {
+        activeAuctions.clear();
+        activeAuctions.putAll(auctions);
+    }
+
     public void closeAuction(String itemName) {
         Auction auction = activeAuctions.remove(itemName);
         if (auction != null) {
