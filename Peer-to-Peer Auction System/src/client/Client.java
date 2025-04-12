@@ -17,9 +17,6 @@ public class Client {
     private ServerSocket tcpServer;
     private int tcpPort;
     private NetworkConfig networkConfig;
-    // Constants for multicast discovery
-//    private static final String MULTICAST_ADDRESS = "230.0.0.0";
-//    private static final int MULTICAST_PORT = 4446;
 
     public Client(String name, String role) throws IOException {
         this.name = name;
@@ -31,13 +28,6 @@ public class Client {
 
         // Discover server using network discovery
         discoverServer();
-
-        // Initially, we don't know the server's address.
-        //serverAddress = null;
-        //serverPort = 0;
-
-        // Start the multicast listener thread to discover the server.
-        //startMulticastListener();
 
         // Create a TCP server socket on any available port (can throw IOException)
         tcpServer = new ServerSocket(0);
@@ -108,74 +98,7 @@ public class Client {
         }
     }
 
-//    private NetworkInterface getPreferredNetworkInterface() throws SocketException {
-//        Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
-//        while (interfaces.hasMoreElements()) {
-//            NetworkInterface iface = interfaces.nextElement();
-//            String displayName = iface.getDisplayName().toLowerCase();
-//            // Skip loopback, virtual, or VPN-like interfaces
-//            if (iface.isLoopback() || iface.isVirtual() || displayName.contains("nordlynx")) {
-//                continue;
-//            }
-//            if (iface.isUp() && iface.supportsMulticast()) {
-//                return iface;
-//            }
-//        }
-//        // Fallback: if nothing is found, return the interface from the default local host
-//        try {
-//            return NetworkInterface.getByInetAddress(InetAddress.getLocalHost());
-//        } catch (UnknownHostException e) {
-//            throw new RuntimeException(e);
-//        }
-//    }
-
-//    private void startMulticastListener() {
-//        new Thread(() -> {
-//            try (MulticastSocket multicastSocket = new MulticastSocket(MULTICAST_PORT)) {
-//                InetAddress group = InetAddress.getByName(MULTICAST_ADDRESS);
-//                NetworkInterface networkInterface = getPreferredNetworkInterface();
-//                if (networkInterface == null) {
-//                    System.out.println("No suitable network interface found.");
-//                    return;
-//                }
-//                multicastSocket.joinGroup(new InetSocketAddress(group, MULTICAST_PORT), networkInterface);
-//                System.out.println("Joined multicast group on interface: " + networkInterface.getDisplayName());
-//
-//                // Loop until the server address is discovered.
-//                while (serverAddress == null) {
-//                    byte[] buffer = new byte[1024];
-//                    DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
-//                    multicastSocket.receive(packet);
-//                    String advertisement = new String(packet.getData(), 0, packet.getLength());
-//                    if (advertisement.startsWith("SERVER_IP")) {
-//                        String[] tokens = advertisement.split(" ");
-//                        if (tokens.length >= 3) {
-//                            String discoveredIp = tokens[1];
-//                            int discoveredUdpPort = Integer.parseInt(tokens[2]);
-//                            serverAddress = InetAddress.getByName(discoveredIp);
-//                            serverPort = discoveredUdpPort;
-//                            System.out.println("Discovered Server: " + serverAddress.getHostAddress() + ", UDP Port: " + serverPort);
-//                        }
-//                    }
-//                }
-//                // Exiting the loop stops further printing.
-//            } catch (IOException e) {
-//                e.printStackTrace();
-//            }
-//        }).start();
-//    }
-
     public void start() {
-
-        // Wait until the server advertisement has been received.
-//        while (serverAddress == null) {
-//            System.out.println("Waiting for server advertisement...");
-//            try {
-//                Thread.sleep(3000);
-//            } catch (InterruptedException e) {
-//            }
-//        }
-
         // Print network information
         networkConfig.printNetworkInfo();
 
@@ -191,11 +114,6 @@ public class Client {
                 tcpPort
         );
         sendUDPMessage(registerMessage);
-
-//        try {
-//            Thread.sleep(1000);
-//        } catch (InterruptedException e) {
-//        }
 
         // Print basic info
         System.out.println("----------------------------------------------------");
